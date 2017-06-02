@@ -19,8 +19,10 @@ import tensorflow as tf
 import math
 import gc
 batch_size=30
-no_epochs = 1
-l=0.5                                                          # lambda parameter for loss function
+no_epochs = 2
+l=0.5                                                                               # lambda parameter for loss function
+count_pixels=10                                                           #count of content pixels for thresholding on aspect ratio and size 
+
 def indicator_function(x):
 	return 1
 def custom_objective_single(y1,y2):
@@ -209,40 +211,55 @@ for i in range(9):
 		start_y = j*46
 		image_patch = img[start_x:start_x+56,start_y:start_y+56]
 		image_patch = np.resize(image_patch,(1,56,56,1))
-		output = model.predict(image_patch,batch_size=1)                   #Numpy array of predictions
-		print(output.shape)		
+		output = model.predict(image_patch,batch_size=1)                   #Numpy array of predictions		
 		new_image[i*56:56*(i+1),56*j:56*(j+1)] = output.reshape((56,56))
 new_image = cv2.resize(new_image,(424,424))
-print (new_image)
 #Automated Segmentation ----- Corner Detection using bending value   See this paper   and then do segment generation and Pseudo Character segmentation
+#Also can use Image segmentation using water-shed algorithm(directly in opencv2) for segmentation and connected components
 
-#Binarize the image and find the connected components
+#Our approach is ----Binarize the image and find the connected components
+#ret2,th2 = cv2.threshold(img,0,255,cv2.THRESH_BINARY+cv2.THRESH_OTSU)        #this only works for images i.e. where pixel values are between 0 and 255 it wont work for new_image which is probably in range -1 and 1
+#can also apply adaptive threshold 
+#th3 = cv2.adaptiveThreshold(img,255,cv2.ADAPTIVE_THRESH_GAUSSIAN_C,cv2.THRESH_BINARY,11,2)
 z = np.amax(new_image)
 z = 0.9*z
 binarized_image=np.zeros((new_image.shape))
 binarized_image[new_image<z]=0
 binarized_image[new_image>=z]=1
-print (binarized_image)
+
+#ret,amrkers=cv2.connectedComponents(sure_fg)
+#markers=markers +1          to make "sure background" 1 and not 0
 #two-pass algorithm
 linked={}
 nextlabel=1
 labels = np.zeros((binarized_image.shape))
 parent={}
+rank={}
 def find(X):
-	if(parent[X]==X):
-		return X
-	else:
-		return find(parent[X])
+	if(parent[X]!=X):
+		parent[X]=find(parent[X])
+	return parent[X]
 
 def union(X,Y):
-	labels=set()
+	label=set()
 	for i in X:
 		for j in range(len(Y)):
-			xroot=find(i)
-			yroot=find(Y[i])
-			parent[xroot]=yroot
-			labels.add(yroot)
-	return labels 
+			xroot=int(find(int(i)))
+			yroot=int(find(int(Y[j])))
+			if(xroot==yroot):
+				label.add(xroot)
+				continue
+			if(rank[xroot]<rank[yroot]):
+				parent[xroot]=yroot
+				label.add(yroot)
+			elif(rank[xroot]>rank[yroot]):
+				parent[yroot]=xroot
+				label.add(xroot)
+			else:
+				parent[yroot]=xroot
+				label.add(xroot)				
+				rank[xroot]+=1
+	return label 
 		
 for i in range(binarized_image.shape[0]):
 	for j in range(binarized_image.shape[1]):
@@ -265,12 +282,14 @@ for i in range(binarized_image.shape[0]):
 			if(len(actual_neighbours)==0):
 				linked[nextlabel]={nextlabel}
 				parent[nextlabel]=nextlabel
+				rank[nextlabel]=0
 				labels[i][j]=nextlabel
 				nextlabel+=1
 			else:
-				L=[]
+				L=set()
 				for k in range(len(actual_neighbours)):
-					L.append(labels[actual_neighbours[k][0]][actual_neighbours[k][1]])
+					L.add(labels[actual_neighbours[k][0]][actual_neighbours[k][1]])
+				L=list(L)				
 				labels[i][j] = min(L)
 				for label in L:
 					linked[label]=union(linked[label],L)
@@ -279,14 +298,43 @@ for i in range(binarized_image.shape[0]):
 		if(binarized_image[i][j]!=0):
 			labels[i][j]=find(labels[i][j])
 
-print (labels)												
-#ret2,th2 = cv2.threshold(img,0,255,cv2.THRESH_BINARY+cv2.THRESH_OTSU)        #this only works for images i.e. where pixel values are between 0 and 255 it wont work for new_image which is probably in range -1 and 1
+print(labels)                                   #labels contains different labels for the different connected components of the obtained image
+ls={}
+z=0
+for i in range(labels.shape[0]):
+	for j in range(labels.shape[1]):
+		if(labels[i][j]==0):
+			continue
+		if(labels[i][j] not in ls.keys()):
+			ls[labels[i][j]]=z+1
+			z+=1
+		labels[i][j] = ls[labels[i][j]]
+												
 #Threshold on size(no. of pixels) and aspect ratio(w:h)
+ls={}
+for i in range(labels.shape[0]):
+	for j in range(labels.shape[1]):
+		if(labels[i][j] not in ls.keys()):
+			ls[labels[i][j]]=1
+		else:
+			ls[labels[i][j]]+=1
 
-# Data Augmentation : adding rotation [-15,+15]; some skew (rho<1.5),
-#intensity of foreground(pixel X i where i~N(1,0.1)) and scale [0.8,1.2])
+for i in range(labels.shape[0]):
+	for j in range(labels.shape[1]):
+		if(ls[labels[i][j]]<count_pixels):
+			labels[i][j]=0
+
+# Data Augmentation : adding rotation [-15,+15]; some skew (rho<1.5),intensity of foreground(pixel X i where i~N(1,0.1)) and scale [0.8,1.2])
+angle = 10
+image_center = tuple(np.array(labels.shape)/2)
+rot_mat = cv2.getRotationMatrix2D(image_center,angle,1.0)
+result = cv2.warpAffine(labels, rot_mat, labels.shape,flags=cv2.INTER_LINEAR)   # result is the image obtained after rotation by given angle
 
 #Then do further segmentation using seam, vert and TAS methods  csn ignore
 #Then use Fiel's network(caffenet) for writer identification on the individual local patches
 #obtained after segmentation and preprocessing above.
+#Divide into patches again
+model=Sequential()
+model.add(Conv2D(64,(11,11),strides=(1,1),use_bias=True,input_shape=(56,56,1)))
+#implement the GoogleNet architecture here
         
