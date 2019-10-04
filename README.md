@@ -1,2 +1,2 @@
 # deepLearning
-An implementation of some Deep Learning Architectures
+An implementation of some state-of-the-art Deep Learning Architectures
